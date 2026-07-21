@@ -1,0 +1,14 @@
+{
+  "name": "proofpay-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ProofPay backend service scaffold.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "mongoose": "^8.9.5"
+  }
+}
