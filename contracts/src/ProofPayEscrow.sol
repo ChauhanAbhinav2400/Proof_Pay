@@ -110,6 +110,11 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
             "AcceptEscrow(uint256 escrowId,uint256 nonce,uint256 deadline)"
         );
 
+    bytes32 private constant APPROVE_MILESTONE_TYPEHASH =
+        keccak256(
+            "ApproveMilestone(uint256 escrowId,uint256 nonce,uint256 deadline)"
+        );
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -212,5 +217,58 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         escrow.state = EscrowState.Active;
 
         emit EscrowAccepted(escrowId, escrow.freelancer);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           MILESTONE APPROVAL
+    //////////////////////////////////////////////////////////////*/
+
+    function approveMilestone(
+        uint256 escrowId,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant {
+        Escrow storage escrow = escrows[escrowId];
+
+        // Validate escrow existence, active state, and signature deadline.
+        if (escrow.client == address(0)) revert EscrowNotFound();
+        if (escrow.state != EscrowState.Active) revert InvalidState();
+        if (deadline < block.timestamp) revert DeadlineExpired();
+
+        // Read the client nonce used in the signed approval.
+        uint256 currentNonce = nonces[escrow.client];
+
+        // Build and hash the EIP-712 typed milestone approval payload.
+        bytes32 structHash = keccak256(
+            abi.encode(
+                APPROVE_MILESTONE_TYPEHASH,
+                escrowId,
+                currentNonce,
+                deadline
+            )
+        );
+        bytes32 digest = _hashTypedDataV4(structHash);
+
+        address signer = ECDSA.recover(digest, signature);
+        if (signer != escrow.client) revert InvalidSignature();
+
+        nonces[escrow.client] = currentNonce + 1;
+
+        uint8 approvedMilestone = escrow.currentMilestone;
+        uint256 amount = escrow.milestoneAmounts[approvedMilestone];
+
+        SafeERC20.safeTransfer(
+            IERC20(escrow.paymentToken),
+            escrow.freelancer,
+            amount
+        );
+
+        escrow.currentMilestone++;
+
+        if (escrow.currentMilestone == escrow.milestoneAmounts.length) {
+            escrow.state = EscrowState.Completed;
+        }
+
+        emit MilestoneApproved(escrowId, approvedMilestone, amount);
     }
 }
