@@ -16,6 +16,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// @notice Initial contract skeleton for the ProofPay escrow protocol.
 /// @dev Protocol functions and state transitions are intentionally not implemented in this skeleton.
 contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
+    using SafeERC20 for IERC20;
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -55,9 +56,9 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         address paymentToken;
         uint256 totalAmount;
         uint256[] milestoneAmounts;
-        uint256 acceptanceDeadline;
-        EscrowState state;
+        uint64 acceptanceDeadline;
         uint8 currentMilestone;
+        EscrowState state;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -143,31 +144,36 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         address freelancer,
         address paymentToken,
         uint256[] calldata milestoneAmounts,
-        uint256 acceptanceDeadline
+        uint64 acceptanceDeadline
     ) external nonReentrant returns (uint256 escrowId) {
         if (freelancer == address(0)) revert ZeroAddress();
         if (freelancer == msg.sender) revert InvalidFreelancer();
         if (paymentToken == address(0)) revert ZeroAddress();
         if (milestoneAmounts.length == 0) revert EmptyMilestoneArray();
-        if (acceptanceDeadline <= block.timestamp) revert DeadlineExpired();
+        if (acceptanceDeadline <= uint64(block.timestamp))
+            revert DeadlineExpired();
 
         uint256 totalAmount;
-        for (uint256 i = 0; i < milestoneAmounts.length; i++) {
+        uint256 length = milestoneAmounts.length;
+        for (uint256 i = 0; i < length; ) {
             uint256 milestoneAmount = milestoneAmounts[i];
             if (milestoneAmount == 0) revert ZeroAmount();
 
             totalAmount += milestoneAmount;
+            unchecked {
+                ++i;
+            }
         }
 
-        SafeERC20.safeTransferFrom(
-            IERC20(paymentToken),
+        IERC20(paymentToken).safeTransferFrom(
             msg.sender,
             address(this),
             totalAmount
         );
-
         escrowId = _nextEscrowId;
-        _nextEscrowId++;
+        unchecked {
+            _nextEscrowId++;
+        }
 
         escrows[escrowId] = Escrow({
             client: msg.sender,
@@ -199,32 +205,28 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         bytes calldata signature
     ) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
-
-        // Validate escrow existence, state, and signature deadline.
+        address freelancer = escrow.freelancer;
         if (escrow.client == address(0)) revert EscrowNotFound();
         if (escrow.state != EscrowState.PendingAcceptance)
             revert InvalidState();
-        if (block.timestamp > escrow.acceptanceDeadline)
+        if (uint64(block.timestamp) > escrow.acceptanceDeadline)
             revert DeadlineExpired();
         if (deadline <= block.timestamp) revert DeadlineExpired();
 
-        // Read the freelancer nonce used in the signed acceptance.
-        uint256 currentNonce = nonces[escrow.freelancer];
+        uint256 currentNonce = nonces[freelancer];
 
-        // Build and hash the EIP-712 typed acceptance payload.
         bytes32 structHash = keccak256(
             abi.encode(ACCEPT_ESCROW_TYPEHASH, escrowId, currentNonce, deadline)
         );
         bytes32 digest = _hashTypedDataV4(structHash);
 
-        // Recover and verify the freelancer signature before mutating state.
         address signer = ECDSA.recover(digest, signature);
-        if (signer != escrow.freelancer) revert InvalidSignature();
+        if (signer != freelancer) revert InvalidSignature();
 
-        nonces[escrow.freelancer] = currentNonce + 1;
+        nonces[freelancer] = currentNonce + 1;
         escrow.state = EscrowState.Active;
 
-        emit EscrowAccepted(escrowId, escrow.freelancer);
+        emit EscrowAccepted(escrowId, freelancer);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -237,16 +239,14 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         bytes calldata signature
     ) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
-
-        // Validate escrow existence, active state, and signature deadline.
+        address client = escrow.client;
+        uint8 milestone = escrow.currentMilestone;
         if (escrow.client == address(0)) revert EscrowNotFound();
         if (escrow.state != EscrowState.Active) revert InvalidState();
-        if (deadline < block.timestamp) revert DeadlineExpired();
+        if (deadline <= block.timestamp) revert DeadlineExpired();
 
-        // Read the client nonce used in the signed approval.
-        uint256 currentNonce = nonces[escrow.client];
+        uint256 currentNonce = nonces[client];
 
-        // Build and hash the EIP-712 typed milestone approval payload.
         bytes32 structHash = keccak256(
             abi.encode(
                 APPROVE_MILESTONE_TYPEHASH,
@@ -258,22 +258,18 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         bytes32 digest = _hashTypedDataV4(structHash);
 
         address signer = ECDSA.recover(digest, signature);
-        if (signer != escrow.client) revert InvalidSignature();
+        if (signer != client) revert InvalidSignature();
 
-        nonces[escrow.client] = currentNonce + 1;
+        nonces[client] = currentNonce + 1;
 
-        uint8 approvedMilestone = escrow.currentMilestone;
+        uint8 approvedMilestone = milestone;
         uint256 amount = escrow.milestoneAmounts[approvedMilestone];
 
-        SafeERC20.safeTransfer(
-            IERC20(escrow.paymentToken),
-            escrow.freelancer,
-            amount
-        );
+        IERC20(escrow.paymentToken).safeTransfer(escrow.freelancer, amount);
 
         escrow.currentMilestone++;
 
-        if (escrow.currentMilestone == escrow.milestoneAmounts.length) {
+        if (milestone == escrow.milestoneAmounts.length) {
             escrow.state = EscrowState.Completed;
         }
 
@@ -286,17 +282,16 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
 
     function cancelEscrow(uint256 escrowId) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
+        address client = escrow.client;
 
-        // Validate escrow existence, caller, state, and acceptance timeout.
-        if (escrow.client == address(0)) revert EscrowNotFound();
-        if (msg.sender != escrow.client) revert Unauthorized();
+        if (client == address(0)) revert EscrowNotFound();
+        if (msg.sender != client) revert Unauthorized();
         if (escrow.state != EscrowState.PendingAcceptance)
             revert InvalidState();
-        if (block.timestamp <= escrow.acceptanceDeadline)
+        if (uint64(block.timestamp) <= escrow.acceptanceDeadline)
             revert DeadlineExpired();
 
-        SafeERC20.safeTransfer(
-            IERC20(escrow.paymentToken),
+        IERC20(escrow.paymentToken).safeTransfer(
             escrow.client,
             escrow.totalAmount
         );
@@ -313,7 +308,6 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
     function raiseDispute(uint256 escrowId) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
 
-        // Validate escrow existence, active state, and party authorization.
         if (escrow.client == address(0)) revert EscrowNotFound();
         if (escrow.state != EscrowState.Active) revert InvalidState();
         if (msg.sender != escrow.client && msg.sender != escrow.freelancer)
@@ -333,10 +327,10 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         bytes calldata signature
     ) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
-
+        IERC20 token = IERC20(escrow.paymentToken);
         if (escrow.client == address(0)) revert EscrowNotFound();
         if (escrow.state != EscrowState.Disputed) revert InvalidState();
-        if (deadline < block.timestamp) revert DeadlineExpired();
+        if (deadline <= block.timestamp) revert DeadlineExpired();
 
         uint256 currentNonce = nonces[arbitrator];
 
@@ -361,8 +355,11 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         nonces[arbitrator]++;
 
         uint256 paidAmount;
-        for (uint256 i = 0; i < escrow.currentMilestone; i++) {
+        for (uint256 i = 0; i < escrow.currentMilestone; ) {
             paidAmount += escrow.milestoneAmounts[i];
+            unchecked {
+                ++i;
+            }
         }
 
         uint256 remainingBalance = escrow.totalAmount - paidAmount;
@@ -370,17 +367,9 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
             revert InvalidAmountDistribution();
         }
 
-        SafeERC20.safeTransfer(
-            IERC20(escrow.paymentToken),
-            escrow.freelancer,
-            freelancerAward
-        );
+        token.safeTransfer(escrow.freelancer, freelancerAward);
 
-        SafeERC20.safeTransfer(
-            IERC20(escrow.paymentToken),
-            escrow.client,
-            clientRefund
-        );
+        token.safeTransfer(escrow.client, clientRefund);
 
         escrow.state = EscrowState.Completed;
 
