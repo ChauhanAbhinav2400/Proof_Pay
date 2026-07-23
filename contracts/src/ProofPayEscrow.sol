@@ -31,6 +31,7 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
     error DeadlineExpired();
     error InvalidFreelancer();
     error EmptyMilestoneArray();
+    error InvalidAmountDistribution();
 
     /*//////////////////////////////////////////////////////////////
                                 ENUMS
@@ -113,6 +114,11 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
     bytes32 private constant APPROVE_MILESTONE_TYPEHASH =
         keccak256(
             "ApproveMilestone(uint256 escrowId,uint256 nonce,uint256 deadline)"
+        );
+
+    bytes32 private constant RESOLVE_DISPUTE_TYPEHASH =
+        keccak256(
+            "ResolveDispute(uint256 escrowId,uint256 freelancerAward,uint256 clientRefund,uint256 nonce,uint256 deadline)"
         );
 
     /*//////////////////////////////////////////////////////////////
@@ -198,7 +204,9 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         if (escrow.client == address(0)) revert EscrowNotFound();
         if (escrow.state != EscrowState.PendingAcceptance)
             revert InvalidState();
-        if (deadline < block.timestamp) revert DeadlineExpired();
+        if (block.timestamp > escrow.acceptanceDeadline)
+            revert DeadlineExpired();
+        if (deadline <= block.timestamp) revert DeadlineExpired();
 
         // Read the freelancer nonce used in the signed acceptance.
         uint256 currentNonce = nonces[escrow.freelancer];
@@ -270,5 +278,112 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         }
 
         emit MilestoneApproved(escrowId, approvedMilestone, amount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ESCROW CANCELLATION
+    //////////////////////////////////////////////////////////////*/
+
+    function cancelEscrow(uint256 escrowId) external nonReentrant {
+        Escrow storage escrow = escrows[escrowId];
+
+        // Validate escrow existence, caller, state, and acceptance timeout.
+        if (escrow.client == address(0)) revert EscrowNotFound();
+        if (msg.sender != escrow.client) revert Unauthorized();
+        if (escrow.state != EscrowState.PendingAcceptance)
+            revert InvalidState();
+        if (block.timestamp <= escrow.acceptanceDeadline)
+            revert DeadlineExpired();
+
+        SafeERC20.safeTransfer(
+            IERC20(escrow.paymentToken),
+            escrow.client,
+            escrow.totalAmount
+        );
+
+        escrow.state = EscrowState.Cancelled;
+
+        emit EscrowCancelled(escrowId, msg.sender);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            DISPUTE RAISING
+    //////////////////////////////////////////////////////////////*/
+
+    function raiseDispute(uint256 escrowId) external nonReentrant {
+        Escrow storage escrow = escrows[escrowId];
+
+        // Validate escrow existence, active state, and party authorization.
+        if (escrow.client == address(0)) revert EscrowNotFound();
+        if (escrow.state != EscrowState.Active) revert InvalidState();
+        if (msg.sender != escrow.client && msg.sender != escrow.freelancer)
+            revert Unauthorized();
+
+        escrow.state = EscrowState.Disputed;
+
+        emit DisputeRaised(escrowId, msg.sender);
+    }
+
+    function resolveDispute(
+        uint256 escrowId,
+        address arbitrator,
+        uint256 freelancerAward,
+        uint256 clientRefund,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant {
+        Escrow storage escrow = escrows[escrowId];
+
+        if (escrow.client == address(0)) revert EscrowNotFound();
+        if (escrow.state != EscrowState.Disputed) revert InvalidState();
+        if (deadline < block.timestamp) revert DeadlineExpired();
+
+        uint256 currentNonce = nonces[arbitrator];
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                RESOLVE_DISPUTE_TYPEHASH,
+                escrowId,
+                freelancerAward,
+                clientRefund,
+                currentNonce,
+                deadline
+            )
+        );
+
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, signature);
+
+        if (signer != arbitrator || !hasRole(ARBITRATOR_ROLE, signer)) {
+            revert InvalidSignature();
+        }
+
+        nonces[arbitrator]++;
+
+        uint256 paidAmount;
+        for (uint256 i = 0; i < escrow.currentMilestone; i++) {
+            paidAmount += escrow.milestoneAmounts[i];
+        }
+
+        uint256 remainingBalance = escrow.totalAmount - paidAmount;
+        if (freelancerAward + clientRefund != remainingBalance) {
+            revert InvalidAmountDistribution();
+        }
+
+        SafeERC20.safeTransfer(
+            IERC20(escrow.paymentToken),
+            escrow.freelancer,
+            freelancerAward
+        );
+
+        SafeERC20.safeTransfer(
+            IERC20(escrow.paymentToken),
+            escrow.client,
+            clientRefund
+        );
+
+        escrow.state = EscrowState.Completed;
+
+        emit DisputeResolved(escrowId, signer, freelancerAward, clientRefund);
     }
 }
