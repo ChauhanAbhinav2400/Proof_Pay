@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 import fs from "fs";
 import path from "path";
 import {
@@ -10,6 +8,8 @@ import {
   isAddress,
 } from "ethers";
 
+import { env } from "./env";
+
 interface DeploymentMetadata {
   chainId: number;
   MockUSDT: string;
@@ -18,21 +18,12 @@ interface DeploymentMetadata {
 
 type ContractName = "MockUSDT" | "ProofPayEscrow";
 
-const DEPLOYMENT_FILES_BY_CHAIN_ID: Readonly<Record<number, string>> = {
-  31337: "anvil.json",
-  11155111: "sepolia.json",
-};
-
-const rpcUrl = getRequiredEnv("RPC_URL");
-const privateKey = getRequiredEnv("PRIVATE_KEY");
-const chainId = parseChainId(getRequiredEnv("CHAIN_ID"));
-
-const deployment = loadDeployment(chainId);
+const deployment = loadDeployment(env.DEPLOYMENT_FILE, env.CHAIN_ID);
 const mockUSDTAbi = loadAbi("MockUSDT");
 const proofPayEscrowAbi = loadAbi("ProofPayEscrow");
 
-export const provider = new JsonRpcProvider(rpcUrl);
-export const wallet = createWallet(privateKey, provider);
+export const provider = new JsonRpcProvider(env.RPC_URL);
+export const wallet = createWallet(env.PRIVATE_KEY, provider);
 
 export const mockUSDTContract = new Contract(
   deployment.MockUSDT,
@@ -53,24 +44,24 @@ export const blockchain = {
   proofPayEscrowContract,
 } as const;
 
-function getRequiredEnv(name: "RPC_URL" | "PRIVATE_KEY" | "CHAIN_ID"): string {
-  const value = process.env[name];
+/** Refuses startup when the configured RPC endpoint is on a different chain. */
+export async function validateBlockchainNetwork(): Promise<void> {
+  let connectedChainId: bigint;
 
-  if (!value || value.trim() === "") {
-    throw new Error(`Missing ${name} environment variable.`);
+  try {
+    const network = await provider.getNetwork();
+    connectedChainId = network.chainId;
+  } catch (error) {
+    throw new Error("Failed to read the connected RPC network.", { cause: error });
   }
 
-  return value.trim();
-}
+  const expectedChainId = BigInt(env.CHAIN_ID);
 
-function parseChainId(value: string): number {
-  const parsedChainId = Number(value);
-
-  if (!Number.isInteger(parsedChainId) || parsedChainId <= 0) {
-    throw new Error(`Invalid CHAIN_ID environment variable: ${value}`);
+  if (connectedChainId !== expectedChainId) {
+    throw new Error(
+      `Connected RPC chain: ${connectedChainId.toString()}\nExpected chain: ${env.CHAIN_ID}`
+    );
   }
-
-  return parsedChainId;
 }
 
 function createWallet(
@@ -84,18 +75,11 @@ function createWallet(
   }
 }
 
-function loadDeployment(selectedChainId: number): DeploymentMetadata {
-  const deploymentFile = DEPLOYMENT_FILES_BY_CHAIN_ID[selectedChainId];
-
-  if (!deploymentFile) {
-    throw new Error(`Unsupported chain id: ${selectedChainId}`);
-  }
-
-  const deploymentPath = path.resolve(
-    __dirname,
-    "../../../deployments",
-    deploymentFile,
-  );
+function loadDeployment(
+  deploymentFile: string,
+  selectedChainId: number
+): DeploymentMetadata {
+  const deploymentPath = path.resolve(process.cwd(), deploymentFile);
 
   if (!fs.existsSync(deploymentPath)) {
     throw new Error(`Deployment file not found: ${deploymentPath}`);

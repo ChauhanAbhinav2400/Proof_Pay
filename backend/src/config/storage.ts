@@ -1,6 +1,6 @@
-import "dotenv/config";
-
 import { S3Client } from "@aws-sdk/client-s3";
+
+import { env } from "./env";
 
 const MEBIBYTE = 1024 * 1024;
 
@@ -31,34 +31,15 @@ export const SUPPORTED_CONTENT_TYPES: readonly string[] = Object.freeze([
 
 export const DEFAULT_SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS = 900;
 
-const accessKeyId = getRequiredEnv("AWS_ACCESS_KEY_ID");
-const secretAccessKey = getRequiredEnv("AWS_SECRET_ACCESS_KEY");
-
 export const storageConfig = Object.freeze({
-  region: getRequiredEnv("AWS_REGION"),
-  bucket: getRequiredEnv("AWS_S3_BUCKET_NAME")
+  region: env.AWS_REGION,
+  bucket: env.AWS_S3_BUCKET_NAME
 });
 
 export const s3Client = new S3Client({
   region: storageConfig.region,
   credentials: {
-    accessKeyId,
-    secretAccessKey
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY
   }
 });
-
-function getRequiredEnv(name: StorageEnvironmentVariable): string {
-  const value = process.env[name];
-
-  if (!value || value.trim() === "") {
-    throw new Error(`Missing ${name} environment variable.`);
-  }
-
-  return value.trim();
-}
-
-type StorageEnvironmentVariable =
-  | "AWS_ACCESS_KEY_ID"
-  | "AWS_SECRET_ACCESS_KEY"
-  | "AWS_REGION"
-  | "AWS_S3_BUCKET_NAME";
