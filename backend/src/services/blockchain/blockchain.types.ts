@@ -88,3 +88,8 @@ export interface WaitForTransactionResult {
   receipt: TransactionReceipt;
   transaction: TransactionResult;
 }
+
+export interface GetTokenBalanceInput {
+  tokenAddress: string;
+  account: string;
+}

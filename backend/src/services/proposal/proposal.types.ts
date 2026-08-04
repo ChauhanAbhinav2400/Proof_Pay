@@ -47,6 +47,8 @@ export interface AcceptProposalInput {
   acceptanceDeadline: string;
   milestones: CreateEscrowMilestoneInput[];
   attachments?: EscrowAttachment[];
+  blockchainEscrowId?: string;
+  transactionHash?: string;
 }
 
 export interface AcceptProposalResponse {

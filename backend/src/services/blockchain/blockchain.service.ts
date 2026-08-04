@@ -1,4 +1,5 @@
 import {
+  Contract,
   ZeroAddress,
   type BigNumberish,
   type ContractTransactionReceipt,
@@ -26,6 +27,7 @@ import type {
   EscrowState,
   GetEscrowInput,
   GetEscrowStatusInput,
+  GetTokenBalanceInput,
   GetNonceInput,
   RaiseDisputeInput,
   ResolveDisputeInput,
@@ -66,6 +68,11 @@ interface ProofPayEscrowContract {
   nonces(account: string): Promise<bigint>;
 }
 
+interface Erc20Contract {
+  allowance(owner: string, spender: string): Promise<bigint>;
+  balanceOf(account: string): Promise<bigint>;
+}
+
 interface EscrowTuple extends ReadonlyArray<string | bigint | number> {
   readonly client: string;
   readonly freelancer: string;
@@ -91,6 +98,10 @@ export const blockchainProvider: JsonRpcProvider = provider;
 export const blockchainWallet: Wallet = wallet;
 export const proofPayEscrow = proofPayEscrowContract;
 export const mockUSDT = mockUSDTContract;
+
+export function getProofPayEscrowAddress(): string {
+  return getContractAddress(escrowContract);
+}
 
 export async function getCurrentBlockNumber(): Promise<number> {
   try {
@@ -122,6 +133,7 @@ export async function createEscrow(
   input: CreateEscrowInput
 ): Promise<CreateEscrowResult> {
   try {
+    await ensureCreateEscrowCanBeSent(input);
     const tx = await escrowContract.createEscrow(
       input.freelancer,
       input.paymentToken,
@@ -134,7 +146,63 @@ export async function createEscrow(
 
     return escrowId ? { ...result, escrowId } : result;
   } catch (error) {
+    logBlockchainError("createEscrow", error, {
+      freelancer: input.freelancer,
+      paymentToken: input.paymentToken,
+      milestoneAmounts: input.milestoneAmounts.map((amount) => amount.toString()),
+      acceptanceDeadline: input.acceptanceDeadline.toString()
+    });
     throwBlockchainError("Failed to create escrow on chain.", error);
+  }
+}
+
+async function ensureCreateEscrowCanBeSent(
+  input: CreateEscrowInput
+): Promise<void> {
+  const escrowAddress = getContractAddress(escrowContract);
+  const relayerAddress = await blockchainWallet.getAddress();
+  const tokenCode = await blockchainProvider.getCode(input.paymentToken);
+  const escrowCode = await blockchainProvider.getCode(escrowAddress);
+
+  if (tokenCode === "0x") {
+    throw new Error(
+      `Payment token contract not found on configured RPC: ${input.paymentToken}.`
+    );
+  }
+
+  if (escrowCode === "0x") {
+    throw new Error(
+      `ProofPayEscrow contract not found on configured RPC: ${escrowAddress}.`
+    );
+  }
+
+  const totalAmount: bigint = input.milestoneAmounts.reduce<bigint>(
+    (total, amount) => total + BigInt(amount.toString()),
+    0n
+  );
+  const token = new Contract(
+    input.paymentToken,
+    [
+      "function allowance(address owner,address spender) view returns (uint256)",
+      "function balanceOf(address account) view returns (uint256)"
+    ],
+    blockchainProvider
+  ) as unknown as Erc20Contract;
+  const [allowance, balance] = await Promise.all([
+    token.allowance(relayerAddress, escrowAddress),
+    token.balanceOf(relayerAddress)
+  ]);
+
+  if (allowance < totalAmount) {
+    throw new Error(
+      `Relayer wallet has insufficient ERC20 allowance for escrow creation. Relayer: ${relayerAddress}. Spender: ${escrowAddress}. Required: ${totalAmount.toString()}. Allowance: ${allowance.toString()}.`
+    );
+  }
+
+  if (balance < totalAmount) {
+    throw new Error(
+      `Relayer wallet has insufficient ERC20 balance for escrow creation. Relayer: ${relayerAddress}. Required: ${totalAmount.toString()}. Balance: ${balance.toString()}.`
+    );
   }
 }
 
@@ -256,6 +324,23 @@ export async function getNonce(input: GetNonceInput): Promise<string> {
   }
 }
 
+export async function getTokenBalance(
+  input: GetTokenBalanceInput
+): Promise<string> {
+  try {
+    const token = new Contract(
+      input.tokenAddress,
+      ["function balanceOf(address account) view returns (uint256)"],
+      blockchainProvider
+    ) as unknown as Erc20Contract;
+    const balance = await token.balanceOf(input.account);
+
+    return balance.toString();
+  } catch (error) {
+    throwBlockchainError("Contract call failed.", error);
+  }
+}
+
 export async function waitForTransaction(
   input: WaitForTransactionInput
 ): Promise<WaitForTransactionResult> {
@@ -351,6 +436,16 @@ function getEscrowCreatedId(
   return undefined;
 }
 
+function getContractAddress(contract: ProofPayEscrowContract): string {
+  const target = proofPayEscrowContract.target;
+
+  if (typeof target !== "string") {
+    throw new Error("ProofPayEscrow contract address is invalid.");
+  }
+
+  return target;
+}
+
 function throwBlockchainError(message: string, error: unknown): never {
   throw new Error(getBlockchainErrorMessage(message, error), { cause: error });
 }
@@ -365,10 +460,138 @@ function getBlockchainErrorMessage(message: string, error: unknown): string {
   }
 
   if (isTransactionRevertedError(error)) {
-    return "Transaction reverted.";
+    const decodedError = decodeProofPayRevert(error);
+    const detail = decodedError ?? getErrorMessage(error);
+
+    return detail ? `Transaction reverted: ${detail}` : "Transaction reverted.";
   }
 
-  return message;
+  const detail = getErrorMessage(error);
+
+  return detail ? `${message} ${detail}` : message;
+}
+
+function decodeProofPayRevert(error: unknown): string | undefined {
+  const data = findRevertData(error);
+
+  if (!data) {
+    return undefined;
+  }
+
+  try {
+    const parsedError = escrowContract.interface.parseError(data);
+
+    if (!parsedError) {
+      return undefined;
+    }
+
+    return formatContractError(parsedError.name);
+  } catch {
+    return undefined;
+  }
+}
+
+function formatContractError(errorName: string): string {
+  const messages: Record<string, string> = {
+    InvalidAdmin: "InvalidAdmin()",
+    InvalidArbitrator: "InvalidArbitrator()",
+    InvalidState: "InvalidState() - escrow is not in the required contract state.",
+    InvalidSignature: "InvalidSignature() - EIP-712 signature does not match the required signer.",
+    ZeroAddress: "ZeroAddress()",
+    ZeroAmount: "ZeroAmount()",
+    EscrowNotFound: "EscrowNotFound()",
+    Unauthorized: "Unauthorized() - caller is not permitted by the Solidity contract.",
+    DeadlineExpired: "DeadlineExpired()",
+    InvalidFreelancer: "InvalidFreelancer()",
+    EmptyMilestoneArray: "EmptyMilestoneArray()",
+    InvalidAmountDistribution: "InvalidAmountDistribution()"
+  };
+
+  return messages[errorName] ?? `${errorName}()`;
+}
+
+function findRevertData(value: unknown, seen = new WeakSet<object>()): string | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  if (seen.has(value)) {
+    return undefined;
+  }
+
+  seen.add(value);
+
+  const data = value.data;
+
+  if (typeof data === "string" && /^0x[0-9a-fA-F]{8,}$/.test(data)) {
+    return data;
+  }
+
+  if (isRecord(data)) {
+    const nestedData = findRevertData(data, seen);
+
+    if (nestedData) {
+      return nestedData;
+    }
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    if (isRecord(nestedValue)) {
+      const nestedData = findRevertData(nestedValue, seen);
+
+      if (nestedData) {
+        return nestedData;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function logBlockchainError(
+  operation: string,
+  error: unknown,
+  context: Record<string, unknown>
+): void {
+  console.error(`[ProofPay:blockchain:${operation}]`, {
+    context,
+    error: serializeError(error)
+  });
+}
+
+function serializeError(error: unknown): Record<string, unknown> | string {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+      cause: serializeCause(error.cause)
+    };
+  }
+
+  if (isRecord(error)) {
+    return {
+      code: error.code,
+      reason: error.reason,
+      shortMessage: error.shortMessage,
+      message: error.message,
+      data: error.data
+    };
+  }
+
+  return String(error);
+}
+
+function serializeCause(cause: unknown): unknown {
+  if (cause instanceof Error) {
+    return {
+      name: cause.name,
+      message: cause.message,
+      stack: cause.stack
+    };
+  }
+
+  return cause;
 }
 
 function isUserRejectedError(error: unknown): boolean {

@@ -22,8 +22,8 @@ export async function createProject(
 
   const createInput: CreateProjectRepositoryInput = {
     clientWallet,
-    title: requireText(input.title, "Project title cannot be empty."),
-    description: requireText(input.description, "Description cannot be empty."),
+    title: requireMinLength(input.title, 3, "Project title must be at least 3 characters."),
+    description: requireMinLength(input.description, 10, "Description must be at least 10 characters."),
     budget: requireText(input.budget, "Budget cannot be empty."),
     currency: requireText(input.currency, "Currency cannot be empty."),
     expectedDuration: requireText(
@@ -218,6 +218,16 @@ function requireText(value: string, message: string): string {
   const normalizedValue = value.trim();
 
   if (!normalizedValue) {
+    throw new Error(message);
+  }
+
+  return normalizedValue;
+}
+
+function requireMinLength(value: string, minLength: number, message: string): string {
+  const normalizedValue = value.trim();
+
+  if (normalizedValue.length < minLength) {
     throw new Error(message);
   }
 

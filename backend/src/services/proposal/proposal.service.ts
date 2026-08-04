@@ -1,3 +1,5 @@
+import { startSession } from "mongoose";
+
 import { projectRepository } from "../../repositories/project";
 import type { ProjectRecord } from "../../repositories/project";
 import { proposalRepository } from "../../repositories/proposal";
@@ -161,26 +163,10 @@ export async function acceptProposal(
   ensureProposalBelongsToProject(proposal, project);
   ensureProposalPending(proposal, "Proposal already processed.");
 
-  const acceptedProposal = await proposalRepository.acceptProposal(proposal._id);
-
-  if (!acceptedProposal) {
-    throw new Error("Proposal not found.");
-  }
-
-  await proposalRepository.rejectRemainingProposals(project._id, acceptedProposal._id);
-  const updatedProject = await projectRepository.updateStatus(
-    project._id,
-    "ESCROW_CREATED"
-  );
-
-  if (!updatedProject) {
-    throw new Error("Project not found.");
-  }
-
-  const escrowInput: Parameters<typeof escrowService.createEscrow>[0] = {
+  const escrowInput: Parameters<typeof escrowService.confirmEscrowCreationForProposalAcceptance>[0] = {
     requesterWallet,
     projectId: project._id.toString(),
-    proposalId: acceptedProposal._id.toString(),
+    proposalId: proposal._id.toString(),
     tokenAddress: input.tokenAddress,
     acceptanceDeadline: input.acceptanceDeadline,
     milestones: input.milestones
@@ -190,7 +176,81 @@ export async function acceptProposal(
     escrowInput.attachments = input.attachments;
   }
 
-  const escrow = await escrowService.createEscrow(escrowInput);
+  const confirmedEscrow =
+    input.blockchainEscrowId && input.transactionHash
+      ? await escrowService.confirmExistingEscrowForProposalAcceptance(
+          escrowInput,
+          {
+            blockchainEscrowId: input.blockchainEscrowId,
+            transactionHash: input.transactionHash
+          }
+        )
+      : await escrowService.confirmEscrowCreationForProposalAcceptance(
+          escrowInput
+        );
+  const session = await startSession();
+  let acceptedProposal: ProposalRecord | null = null;
+  let escrow: Awaited<ReturnType<typeof escrowService.persistConfirmedEscrow>> | null = null;
+
+  try {
+    await session.withTransaction(async () => {
+      escrow = await escrowService.persistConfirmedEscrow(confirmedEscrow, {
+        session
+      });
+      acceptedProposal = await proposalRepository.acceptProposal(proposal._id, {
+        session
+      });
+
+      if (!acceptedProposal) {
+        throw new Error("Proposal not found.");
+      }
+
+      await proposalRepository.rejectRemainingProposals(
+        project._id,
+        acceptedProposal._id,
+        { session }
+      );
+      const updatedProject = await projectRepository.updateStatusWithSession(
+        project._id,
+        "ESCROW_CREATED",
+        session
+      );
+
+      if (!updatedProject) {
+        throw new Error("Project not found.");
+      }
+    });
+  } catch (error) {
+    if (!isTransactionUnsupportedError(error)) {
+      throw error;
+    }
+
+    escrow = await escrowService.persistConfirmedEscrow(confirmedEscrow);
+    acceptedProposal = await proposalRepository.acceptProposal(proposal._id);
+
+    if (!acceptedProposal) {
+      throw new Error("Proposal not found.");
+    }
+
+    await proposalRepository.rejectRemainingProposals(
+      project._id,
+      acceptedProposal._id
+    );
+    const updatedProject = await projectRepository.updateStatus(
+      project._id,
+      "ESCROW_CREATED"
+    );
+
+    if (!updatedProject) {
+      throw new Error("Project not found.");
+    }
+  } finally {
+    await session.endSession();
+  }
+
+  if (!acceptedProposal || !escrow) {
+    throw new Error("Proposal acceptance was not committed.");
+  }
 
   return {
     proposal: toProposalResponse(acceptedProposal),
@@ -357,4 +417,15 @@ function toProposalResponse(proposal: ProposalRecord): ProposalResponse {
     createdAt: proposal.createdAt,
     updatedAt: proposal.updatedAt
   };
+}
+
+function isTransactionUnsupportedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error.message.includes("Transaction numbers are only allowed") ||
+    error.message.includes("transactions are not supported")
+  );
 }

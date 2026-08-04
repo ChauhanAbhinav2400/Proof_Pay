@@ -11,7 +11,7 @@ import type {
 } from "./user.types";
 
 const DEFAULT_USER_PERMISSIONS = ["USER"] as const;
-const VALID_USER_PERMISSIONS = new Set(["USER", "ADMIN"]);
+const VALID_USER_PERMISSIONS = new Set(["USER", "ADMIN", "ARBITRATOR"]);
 
 export async function createUser(input: CreateUserInput): Promise<UserResponse> {
   const walletAddress = requireWalletAddress(input.walletAddress);
