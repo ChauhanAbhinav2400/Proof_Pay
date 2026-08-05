@@ -6,6 +6,7 @@ import type {
   CreateProposalInput,
   ProposalListOptions,
   ProposalRecord,
+  ProposalWriteOptions,
   UpdateProposalInput
 } from "./proposal.types";
 
@@ -154,13 +155,14 @@ export async function updateProposal(
 
 export async function updateStatus(
   proposalId: string | Types.ObjectId,
-  status: ProposalStatus
+  status: ProposalStatus,
+  options?: ProposalWriteOptions
 ): Promise<ProposalRecord | null> {
   try {
     return await ProposalModel.findByIdAndUpdate(
       proposalId,
       { $set: { status } },
-      RETURN_UPDATED_DOCUMENT
+      { ...RETURN_UPDATED_DOCUMENT, session: options?.session }
     )
       .select(PROPOSAL_PROJECTION)
       .lean<ProposalRecord>()
@@ -173,21 +175,31 @@ export async function updateStatus(
   }
 }
 
-export async function acceptProposal(
-  proposalId: string | Types.ObjectId
+export async function updateStatusWithSession(
+  proposalId: string | Types.ObjectId,
+  status: ProposalStatus,
+  session: import("mongoose").ClientSession
 ): Promise<ProposalRecord | null> {
-  return updateStatus(proposalId, "ACCEPTED");
+  return updateStatus(proposalId, status, { session });
+}
+
+export async function acceptProposal(
+  proposalId: string | Types.ObjectId,
+  options?: ProposalWriteOptions
+): Promise<ProposalRecord | null> {
+  return updateStatus(proposalId, "ACCEPTED", options);
 }
 
 export async function rejectRemainingProposals(
   projectId: string | Types.ObjectId,
-  acceptedProposalId: string | Types.ObjectId
+  acceptedProposalId: string | Types.ObjectId,
+  options?: ProposalWriteOptions
 ): Promise<UpdateWriteOpResult> {
   try {
     return await ProposalModel.updateMany(
       { projectId, _id: { $ne: acceptedProposalId } },
       { $set: { status: "REJECTED" } },
-      { runValidators: true }
+      { runValidators: true, session: options?.session }
     ).exec();
   } catch (error) {
     throwDatabaseError(
@@ -215,6 +227,14 @@ export async function exists(
       "Database read failed while checking proposal existence.",
       error
     );
+  }
+}
+
+export async function countProposals(status?: ProposalStatus): Promise<number> {
+  try {
+    return await ProposalModel.countDocuments(status ? { status } : {}).exec();
+  } catch (error) {
+    throwDatabaseError("Database read failed while counting proposals.", error);
   }
 }
 

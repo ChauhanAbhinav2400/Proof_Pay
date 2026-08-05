@@ -9,6 +9,7 @@ import type {
   CreateEscrowInput,
   EscrowListOptions,
   EscrowRecord,
+  EscrowWriteOptions,
   UpdateEscrowInput
 } from "./escrow.types";
 
@@ -37,10 +38,12 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
 export async function createEscrow(
-  input: CreateEscrowInput
+  input: CreateEscrowInput,
+  options?: EscrowWriteOptions
 ): Promise<EscrowRecord> {
   try {
-    const escrow = await EscrowModel.create(input);
+    const escrow = new EscrowModel(input);
+    await escrow.save({ session: options?.session });
 
     return escrow.toObject();
   } catch (error) {
@@ -147,6 +150,35 @@ export async function findByFreelancerWallet(
   }
 }
 
+export async function findByParticipantWallet(
+  walletAddress: string,
+  options?: EscrowListOptions
+): Promise<EscrowRecord[]> {
+  const pagination = getPagination(options);
+
+  try {
+    return await EscrowModel.find(
+      {
+        $or: [
+          { clientWallet: walletAddress },
+          { freelancerWallet: walletAddress }
+        ]
+      },
+      ESCROW_PROJECTION
+    )
+      .sort(options?.sort ?? { createdAt: -1 })
+      .skip(pagination.skip)
+      .limit(pagination.limit)
+      .lean<EscrowRecord[]>()
+      .exec();
+  } catch (error) {
+    throwDatabaseError(
+      "Database read failed while finding escrows by participant wallet.",
+      error
+    );
+  }
+}
+
 export async function findByStatus(
   status: EscrowStatus,
   options?: EscrowListOptions
@@ -207,6 +239,28 @@ export async function updateStatus(
   }
 }
 
+export async function updateStatusWithSession(
+  blockchainEscrowId: string,
+  status: EscrowStatus,
+  session: import("mongoose").ClientSession
+): Promise<EscrowRecord | null> {
+  try {
+    return await EscrowModel.findOneAndUpdate(
+      { blockchainEscrowId },
+      { $set: { status } },
+      { ...RETURN_UPDATED_DOCUMENT, session }
+    )
+      .select(ESCROW_PROJECTION)
+      .lean<EscrowRecord>()
+      .exec();
+  } catch (error) {
+    throwDatabaseError(
+      "Database write failed while updating escrow status.",
+      error
+    );
+  }
+}
+
 export async function updateMilestones(
   blockchainEscrowId: string,
   milestones: Milestone[]
@@ -238,6 +292,47 @@ export async function exists(blockchainEscrowId: string): Promise<boolean> {
       "Database read failed while checking escrow existence.",
       error
     );
+  }
+}
+
+export async function countEscrows(status?: EscrowStatus): Promise<number> {
+  try {
+    return await EscrowModel.countDocuments(status ? { status } : {}).exec();
+  } catch (error) {
+    throwDatabaseError("Database read failed while counting escrows.", error);
+  }
+}
+
+export async function findRecentEscrows(
+  options?: EscrowListOptions
+): Promise<EscrowRecord[]> {
+  return findByFilter({}, options ?? { limit: 5, sort: { createdAt: -1 } });
+}
+
+export async function findRecentDisputedEscrows(
+  options?: EscrowListOptions
+): Promise<EscrowRecord[]> {
+  return findByFilter(
+    { status: "DISPUTED" },
+    options ?? { limit: 5, sort: { updatedAt: -1 } }
+  );
+}
+
+async function findByFilter(
+  filter: Record<string, unknown>,
+  options?: EscrowListOptions
+): Promise<EscrowRecord[]> {
+  const pagination = getPagination(options);
+
+  try {
+    return await EscrowModel.find(filter, ESCROW_PROJECTION)
+      .sort(options?.sort ?? { createdAt: -1 })
+      .skip(pagination.skip)
+      .limit(pagination.limit)
+      .lean<EscrowRecord[]>()
+      .exec();
+  } catch (error) {
+    throwDatabaseError("Database read failed while listing escrows.", error);
   }
 }
 

@@ -142,6 +142,28 @@ export async function updateStatus(
   }
 }
 
+export async function updateStatusWithSession(
+  projectId: string | Types.ObjectId,
+  status: ProjectStatus,
+  session: import("mongoose").ClientSession
+): Promise<ProjectRecord | null> {
+  try {
+    return await ProjectModel.findByIdAndUpdate(
+      projectId,
+      { $set: { status } },
+      { ...RETURN_UPDATED_DOCUMENT, session }
+    )
+      .select(PROJECT_PROJECTION)
+      .lean<ProjectRecord>()
+      .exec();
+  } catch (error) {
+    throwDatabaseError(
+      "Database write failed while updating project status.",
+      error
+    );
+  }
+}
+
 export async function cancelProject(
   projectId: string | Types.ObjectId
 ): Promise<ProjectRecord | null> {
@@ -161,6 +183,38 @@ export async function exists(projectId: string | Types.ObjectId): Promise<boolea
   }
 }
 
+export async function countProjects(status?: ProjectStatus): Promise<number> {
+  try {
+    return await ProjectModel.countDocuments(status ? { status } : {}).exec();
+  } catch (error) {
+    throwDatabaseError("Database read failed while counting projects.", error);
+  }
+}
+
+export async function findRecentProjects(
+  options?: ProjectListOptions
+): Promise<ProjectRecord[]> {
+  return findByFilter({}, options ?? { limit: 5, sort: { createdAt: -1 } });
+}
+
+async function findByFilter(
+  filter: Record<string, unknown>,
+  options?: ProjectListOptions
+): Promise<ProjectRecord[]> {
+  const pagination = getPagination(options);
+
+  try {
+    return await ProjectModel.find(filter, PROJECT_PROJECTION)
+      .sort(options?.sort ?? { createdAt: -1 })
+      .skip(pagination.skip)
+      .limit(pagination.limit)
+      .lean<ProjectRecord[]>()
+      .exec();
+  } catch (error) {
+    throwDatabaseError("Database read failed while listing projects.", error);
+  }
+}
+
 function getPagination(options?: ProjectListOptions): {
   limit: number;
   skip: number;
@@ -172,5 +226,8 @@ function getPagination(options?: ProjectListOptions): {
 }
 
 function throwDatabaseError(message: string, cause: unknown): never {
-  throw new Error(message, { cause });
+  const detail = cause instanceof Error ? cause.message : "";
+  const fullMessage = detail ? `${message} ${detail}` : message;
+
+  throw new Error(fullMessage, { cause });
 }

@@ -149,6 +149,14 @@ export async function existsByWallet(walletAddress: string): Promise<boolean> {
   }
 }
 
+export async function countUsers(): Promise<number> {
+  try {
+    return await UserModel.countDocuments({}).exec();
+  } catch (error) {
+    throwDatabaseError("Database read failed while counting users.", error);
+  }
+}
+
 function throwDatabaseError(message: string, cause: unknown): never {
   throw new Error(message, { cause });
 }

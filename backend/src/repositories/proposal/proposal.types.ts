@@ -1,4 +1,4 @@
-import type { Types } from "mongoose";
+import type { ClientSession, Types } from "mongoose";
 
 import type {
   Proposal,
@@ -28,6 +28,10 @@ export interface ProposalListOptions {
   limit?: number;
   skip?: number;
   sort?: ProposalSortOptions;
+}
+
+export interface ProposalWriteOptions {
+  session?: ClientSession;
 }
 
 export type ProposalSortOptions = Partial<

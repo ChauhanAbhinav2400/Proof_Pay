@@ -1,4 +1,5 @@
 import type { Types } from "mongoose";
+import type { ClientSession } from "mongoose";
 
 import type {
   Escrow,
@@ -38,6 +39,10 @@ export interface EscrowListOptions {
   limit?: number;
   skip?: number;
   sort?: EscrowSortOptions;
+}
+
+export interface EscrowWriteOptions {
+  session?: ClientSession;
 }
 
 export type EscrowSortOptions = Partial<
