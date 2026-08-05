@@ -9,7 +9,6 @@
     "use:sepolia": "tsx scripts/use-env.ts sepolia",
     "predev": "npm run prepare:env",
     "dev": "vite",
-    "prebuild": "npm run prepare:env",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
