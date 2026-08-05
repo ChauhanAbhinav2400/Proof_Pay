@@ -2,63 +2,89 @@
 
 ## Overview
 
-ProofPay is a Web3 freelancer marketplace where project discovery, proposals, acceptance, and pre-escrow collaboration are handled off-chain. Blockchain interaction begins only after a client accepts a proposal and configures escrow milestones.
+ProofPay is a Web3 freelancing platform where project discovery, proposals, negotiation, chat, and file sharing are handled off-chain, while escrow custody and settlement are enforced by the `ProofPayEscrow` smart contract.
 
-The backend provides the application boundary for authentication, marketplace data, chat coordination, blockchain transaction orchestration, and contract event synchronization.
+The current production flow is frontend-led for user-wallet transactions:
+
+1. The client accepts a proposal in the frontend.
+2. The frontend checks MockUSDT allowance and submits `approve()` only if needed.
+3. The frontend creates the escrow on-chain from the connected client wallet.
+4. The backend verifies the existing on-chain escrow, persists the MongoDB projection, and updates proposal/project state.
+
+This avoids a separate user-facing create-escrow workflow. Proposal acceptance is the single entry point for escrow creation.
 
 ## High-Level Component Diagram
 
 ```text
-Client Application
-    |
-    | REST API / Socket.IO
-    v
+Frontend
+  |
+  | REST API / Socket.IO
+  v
 Express Backend
-    |
-    |--------------------------|
-    |                          |
-    v                          v
-MongoDB                    Ethereum RPC
-    |                          |
-    |                          v
-Application Data        ProofPayEscrow / MockUSDT
-    |
-    v
-Socket.IO Presence and Messaging
+  |
+  |------------------------------|
+  |                              |
+  v                              v
+MongoDB                      Ethereum RPC
+  |                              |
+  |                              v
+Application Data            ProofPayEscrow / MockUSDT
+  |
+  v
+Socket.IO Realtime Updates
 ```
+
+## Frontend Responsibilities
+
+- Connect MetaMask through Wagmi injected connector and ethers v6.
+- Request and sign wallet-login nonce challenges.
+- Store JWT session state.
+- Check MockUSDT allowance before escrow creation.
+- Submit ERC20 `approve()` only when allowance is insufficient.
+- Submit client-owned `ProofPayEscrow.createEscrow()` transactions.
+- Sign EIP-712 messages for gasless contract flows where required:
+  - freelancer accepts escrow;
+  - client approves milestone;
+  - arbitrator resolves dispute.
+- Call backend APIs after wallet transactions so MongoDB projections stay synchronized.
 
 ## Backend Responsibilities
 
-- Authenticate wallets and issue backend session tokens.
+- Authenticate wallets and issue JWTs.
+- Auto-create a user only after successful signature verification.
 - Validate API inputs and enforce authorization rules.
-- Persist users, projects, proposals, escrows, milestones, and chat messages.
-- Coordinate off-chain marketplace flows before escrow creation.
-- Submit blockchain transactions through the configured relayer wallet where required.
+- Persist users, projects, proposals, escrows, milestones, chat messages, and attachment metadata.
+- Verify frontend-created escrow transactions before accepting/persisting proposal acceptance.
+- Relay signature-based contract operations where the protocol uses EIP-712.
 - Read contract state and transaction receipts through the shared blockchain configuration layer.
 - Synchronize contract events into MongoDB for API and realtime consumers.
-- Emit Socket.IO updates for proposal chat, escrow chat, and workflow changes.
+- Emit Socket.IO updates for chat and workflow changes.
 
 ## Blockchain Responsibilities
 
 - Custody escrowed ERC20 funds.
 - Enforce on-chain escrow state transitions.
-- Verify EIP-712 signatures for gasless flows.
-- Release funds, refund funds, cancel escrows, and resolve disputes according to the smart contract.
-- Emit canonical events used by the backend indexer.
+- Verify EIP-712 signatures.
+- Release milestone payments.
+- Freeze active escrows when disputes are raised.
+- Resolve disputes according to arbitrator-signed settlement data.
+- Emit canonical events used by the backend listener and indexer.
 
 ## MongoDB Responsibilities
 
-- Store all off-chain marketplace data.
-- Store canonical backend projections of blockchain escrows.
+- Store off-chain marketplace data.
+- Store backend projections of blockchain escrows.
 - Store proposal and escrow chat messages.
 - Preserve cancelled projects and historical workflow records.
-- Enforce database-level uniqueness where required, such as one proposal per freelancer per project and one document per blockchain escrow id.
+- Enforce uniqueness where required, such as:
+  - one proposal per freelancer per project;
+  - one escrow projection per `blockchainEscrowId`.
 
 ## Socket.IO Responsibilities
 
 - Provide realtime proposal chat and escrow chat delivery.
-- Broadcast relevant workflow updates to authorized participants.
-- Use deterministic room names generated from application identifiers:
+- Broadcast typing, room presence, message, and workflow events.
+- Use deterministic room names:
   - `proposal-{proposalId}`
   - `escrow-{blockchainEscrowId}`
 - Never act as the source of truth for authorization or persistence.
@@ -68,53 +94,63 @@ Socket.IO Presence and Messaging
 ```text
 Wallet requests nonce
     |
-Backend stores nonce for wallet
+Backend stores NonceChallenge with TTL
     |
 Wallet signs nonce
     |
 Backend verifies signature
     |
+Backend creates user if wallet is new
+    |
 Backend issues JWT
     |
-Authenticated API / Socket.IO access
+Authenticated REST / Socket.IO access
 ```
 
-Authentication is wallet-based. A wallet represents one account. User permissions are system permissions only, such as `USER` and `ADMIN`.
+User permissions are system-level permissions: `USER`, `ADMIN`, and `ARBITRATOR`.
 
-## Escrow Creation Flow
+## Proposal Acceptance and Escrow Creation Flow
 
 ```text
-Client posts project
+Client creates project
     |
-Freelancers submit proposals
+Freelancer submits proposal
     |
-Client accepts one proposal
+Client accepts proposal in frontend
     |
-Backend marks proposal/project state
+Frontend checks MockUSDT allowance
     |
-Client configures escrow milestones
+Frontend approves ProofPayEscrow if needed
     |
-Backend submits or coordinates contract transaction
+Frontend calls ProofPayEscrow.createEscrow()
     |
-Contract emits escrow event
+Frontend sends proposal acceptance payload
+with blockchainEscrowId + transactionHash
     |
-Backend stores Escrow projection with blockchainEscrowId
+Backend verifies on-chain escrow data
+    |
+Backend atomically persists:
+  - Proposal -> ACCEPTED
+  - Project -> ESCROW_CREATED
+  - Escrow projection
+    |
+Socket.IO/event indexer updates clients
 ```
 
-`blockchainEscrowId` is the canonical identifier used by the frontend, backend, Socket.IO, blockchain workflows, and event indexer.
+`blockchainEscrowId` is the canonical identifier used by the frontend, backend, Socket.IO rooms, blockchain workflows, and event indexer.
 
 ## Event Synchronization Flow
 
 ```text
 ProofPayEscrow event
     |
-Indexer reads event from RPC provider
+Listener reads event from RPC provider
     |
-Backend validates event relevance
+Router sends event to projection/publisher
     |
-MongoDB projection is updated
+MongoDB projection is updated idempotently
     |
-Socket.IO notifies authorized clients
+Socket.IO notifies subscribed clients
 ```
 
-The backend must treat contract events as the authoritative source for on-chain state changes. MongoDB stores an application projection used for querying, filtering, and realtime UI updates.
+The smart contract is the source of truth for token custody and on-chain state. MongoDB stores a queryable application projection used by APIs and realtime UI updates.

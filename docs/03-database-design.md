@@ -11,10 +11,12 @@ Stores wallet-authenticated user accounts and system permissions.
 | Field | Description |
 | --- | --- |
 | `walletAddress` | Unique normalized wallet address. |
-| `displayName` | Required user display name. |
+| `displayName` | Optional user display name. |
 | `email` | Optional user email. |
 | `avatarUrl` | Optional avatar URL. |
-| `permissions` | System permissions only. |
+| `permissions` | System permissions. |
+| `createdAt` | Creation timestamp. |
+| `updatedAt` | Last update timestamp. |
 
 ### Enums
 
@@ -22,6 +24,7 @@ Stores wallet-authenticated user accounts and system permissions.
 
 - `USER`
 - `ADMIN`
+- `ARBITRATOR`
 
 ### Indexes
 
@@ -31,7 +34,26 @@ Stores wallet-authenticated user accounts and system permissions.
 
 ### Relationships
 
-User documents are referenced by wallet address rather than MongoDB object id in marketplace documents.
+Marketplace documents reference users by wallet address rather than user ObjectId.
+
+## NonceChallenge
+
+### Purpose
+
+Stores temporary wallet-login nonce challenges separately from users.
+
+### Important Fields
+
+| Field | Description |
+| --- | --- |
+| `walletAddress` | Normalized wallet address requesting login. |
+| `nonce` | Random challenge string signed by the wallet. |
+| `expiresAt` | Expiration timestamp used for TTL cleanup. |
+| `consumedAt` | Set when a nonce is successfully used. |
+
+### Rules
+
+`/auth/nonce` creates or replaces a challenge. Users are not created until `/auth/verify` succeeds.
 
 ## Project
 
@@ -52,18 +74,8 @@ Represents work posted by a client before blockchain escrow exists.
 | `skills` | Required skills. |
 | `attachments` | Project attachment metadata. |
 | `status` | Project lifecycle state. |
-
-### Embedded Documents
-
-`attachments`:
-
-| Field | Description |
-| --- | --- |
-| `fileName` | Original/display file name. |
-| `fileUrl` | Storage URL. |
-| `mimeType` | File MIME type. |
-| `size` | File size in bytes. |
-| `uploadedBy` | Wallet address of uploader. |
+| `createdAt` | Creation timestamp. |
+| `updatedAt` | Last update timestamp. |
 
 ### Enums
 
@@ -71,6 +83,8 @@ Represents work posted by a client before blockchain escrow exists.
 
 - `OPEN`
 - `ESCROW_CREATED`
+- `IN_PROGRESS`
+- `COMPLETED`
 - `CANCELLED`
 
 ### Indexes
@@ -101,6 +115,8 @@ Represents a freelancer proposal for a project before escrow creation.
 | `proposedBudget` | Proposed budget stored as a string. |
 | `estimatedDuration` | Freelancer-provided duration estimate. |
 | `status` | Proposal lifecycle state. |
+| `createdAt` | Creation timestamp. |
+| `updatedAt` | Last update timestamp. |
 
 ### Enums
 
@@ -108,6 +124,7 @@ Represents a freelancer proposal for a project before escrow creation.
 
 - `PENDING`
 - `ACCEPTED`
+- `CLOSED`
 - `REJECTED`
 - `WITHDRAWN`
 
@@ -140,15 +157,19 @@ Stores the backend projection of one blockchain escrow.
 | `clientWallet` | Escrow client wallet. |
 | `freelancerWallet` | Escrow freelancer wallet. |
 | `tokenAddress` | ERC20 token address. |
-| `totalAmount` | Total escrow amount stored as a string. |
+| `totalAmount` | Total escrow amount in token base units, stored as a string. |
+| `transactionHash` | Escrow creation transaction hash. |
 | `status` | Escrow lifecycle state. |
 | `milestones` | Embedded milestone list. |
 | `attachments` | Escrow attachment metadata. |
+| `createdAt` | Creation timestamp. |
+| `updatedAt` | Last update timestamp. |
 
 ### Enums
 
 `status`:
 
+- `PENDING_FREELANCER`
 - `ACTIVE`
 - `DISPUTED`
 - `COMPLETED`
@@ -188,7 +209,7 @@ Represents a unit of escrow work and payment. Milestones are embedded inside Esc
 | --- | --- |
 | `title` | Milestone title. |
 | `description` | Milestone description. |
-| `amount` | Milestone amount stored as a string. |
+| `amount` | Milestone amount in token base units, stored as a string. |
 | `status` | Milestone lifecycle state. |
 | `submissionFiles` | Attachment metadata for submitted work. |
 | `submittedAt` | Submission timestamp. |
@@ -244,3 +265,17 @@ Stores proposal and escrow chat messages.
 ### Relationships
 
 For proposal chat, `referenceId` stores a Proposal ObjectId. For escrow chat, `referenceId` stores `blockchainEscrowId`.
+
+## Attachment Metadata
+
+Attachments across projects, escrows, milestones, and chat store metadata only:
+
+| Field | Description |
+| --- | --- |
+| `key` or `fileUrl` | S3 object identifier or URL depending on context. |
+| `fileName` | Original/display file name. |
+| `mimeType` | File MIME type. |
+| `size` | File size in bytes. |
+| `uploadedBy` | Wallet address of uploader. |
+
+Binary file contents are stored in S3, not MongoDB.

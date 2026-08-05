@@ -33,6 +33,7 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
     error InvalidFreelancer();
     error EmptyMilestoneArray();
     error InvalidAmountDistribution();
+    error ArbitratorCannotParticipate();
 
     /*//////////////////////////////////////////////////////////////
                                 ENUMS
@@ -240,7 +241,7 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
     ) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
         address client = escrow.client;
-        uint8 milestone = escrow.currentMilestone;
+
         if (escrow.client == address(0)) revert EscrowNotFound();
         if (escrow.state != EscrowState.Active) revert InvalidState();
         if (deadline <= block.timestamp) revert DeadlineExpired();
@@ -262,14 +263,14 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
 
         nonces[client] = currentNonce + 1;
 
-        uint8 approvedMilestone = milestone;
+        uint8 approvedMilestone = escrow.currentMilestone;
         uint256 amount = escrow.milestoneAmounts[approvedMilestone];
 
         IERC20(escrow.paymentToken).safeTransfer(escrow.freelancer, amount);
 
         escrow.currentMilestone++;
 
-        if (milestone == escrow.milestoneAmounts.length) {
+        if (escrow.currentMilestone == escrow.milestoneAmounts.length) {
             escrow.state = EscrowState.Completed;
         }
 
@@ -312,6 +313,8 @@ contract ProofPayEscrow is EIP712, AccessControl, ReentrancyGuard {
         if (escrow.state != EscrowState.Active) revert InvalidState();
         if (msg.sender != escrow.client && msg.sender != escrow.freelancer)
             revert Unauthorized();
+        if (hasRole(ARBITRATOR_ROLE, msg.sender))
+            revert ArbitratorCannotParticipate();
 
         escrow.state = EscrowState.Disputed;
 

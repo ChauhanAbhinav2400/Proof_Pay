@@ -15,14 +15,15 @@ contract HelperConfig is Script {
     function activeNetworkConfig() public view returns (NetworkConfig memory) {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerKey);
-
-        return NetworkConfig({
-            name: networkName(block.chainid),
-            chainId: block.chainid,
-            deployerKey: deployerKey,
-            admin: deployer,
-            arbitrator: deployer
-        });
+        address arbitrator = 0xd533737250142E1D7b0ece9fFeA60e8d4eA52eCf;
+        return
+            NetworkConfig({
+                name: networkName(block.chainid),
+                chainId: block.chainid,
+                deployerKey: deployerKey,
+                admin: deployer,
+                arbitrator: arbitrator
+            });
     }
 
     function networkName(uint256 chainId) public view returns (string memory) {

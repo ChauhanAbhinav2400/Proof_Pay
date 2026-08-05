@@ -1,0 +1,22 @@
+# ==========================
+# Environment Files
+# ==========================
+
+.env
+.env.local
+.env.production
+.env.development
+
+# Network-specific envs
+.env.anvil
+.env.sepolia
+
+# Ignore every .env file...
+.env*
+
+# ...except the examples
+!.env.example
+
+# If you want to keep these templates
+!.env.anvil.example
+!.env.sepolia.example
